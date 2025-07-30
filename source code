@@ -1,0 +1,556 @@
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+from sklearn.metrics import confusion_matrix, classification_report, roc_curve
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.svm import SVC
+from sklearn.linear_model import LogisticRegression
+from imblearn.over_sampling import SMOTE
+import warnings
+
+warnings.filterwarnings('ignore')
+
+# For CatBoost (install: pip install catboost)
+try:
+    from catboost import CatBoostClassifier
+
+    CATBOOST_AVAILABLE = True
+except ImportError:
+    print("CatBoost not available. Install with: pip install catboost")
+    CATBOOST_AVAILABLE = False
+
+# For interpretability (install: pip install shap)
+try:
+    import shap
+
+    SHAP_AVAILABLE = True
+except ImportError:
+    print("SHAP not available. Install with: pip install shap")
+    SHAP_AVAILABLE = False
+
+
+class CVDPredictor:
+    """
+    Cardiovascular Disease Prediction using Machine Learning
+    Based on the research paper implementation
+    """
+
+    def __init__(self):
+        self.models = {}
+        self.scaler = StandardScaler()
+        self.label_encoders = {}
+        self.best_model = None
+        self.feature_names = None
+
+    def create_sample_data(self, n_samples=1000):
+        """
+        Create sample cardiovascular disease dataset
+        Based on the features mentioned in the research paper
+        """
+        np.random.seed(42)
+
+        # Generate sample data with realistic distributions
+        data = {
+            'age': np.random.normal(54, 12, n_samples).astype(int),
+            'sex': np.random.choice([0, 1], n_samples),  # 0: Female, 1: Male
+            'chest_pain_type': np.random.choice([0, 1, 2, 3], n_samples),
+            'resting_bp': np.random.normal(130, 20, n_samples),
+            'cholesterol': np.random.normal(240, 50, n_samples),
+            'fasting_bs': np.random.choice([0, 1], n_samples, p=[0.85, 0.15]),
+            'resting_ecg': np.random.choice([0, 1, 2], n_samples),
+            'max_heart_rate': np.random.normal(150, 25, n_samples),
+            'exercise_angina': np.random.choice([0, 1], n_samples, p=[0.7, 0.3]),
+            'oldpeak': np.random.exponential(1, n_samples),
+            'st_slope': np.random.choice([0, 1, 2], n_samples),
+            'smoking': np.random.choice([0, 1], n_samples, p=[0.8, 0.2]),
+            'diabetes': np.random.choice([0, 1], n_samples, p=[0.9, 0.1])
+        }
+
+        df = pd.DataFrame(data)
+
+        # Ensure realistic ranges
+        df['age'] = np.clip(df['age'], 25, 80)
+        df['resting_bp'] = np.clip(df['resting_bp'], 80, 200)
+        df['cholesterol'] = np.clip(df['cholesterol'], 100, 400)
+        df['max_heart_rate'] = np.clip(df['max_heart_rate'], 60, 220)
+        df['oldpeak'] = np.clip(df['oldpeak'], 0, 6)
+
+        # Create target variable based on risk factors (realistic correlation)
+        risk_score = (
+                (df['age'] > 55) * 2 +
+                (df['cholesterol'] > 240) * 2 +
+                (df['resting_bp'] > 140) * 1.5 +
+                (df['smoking'] == 1) * 1.5 +
+                (df['diabetes'] == 1) * 1.5 +
+                (df['exercise_angina'] == 1) * 1 +
+                (df['oldpeak'] > 1) * 1 +
+                np.random.normal(0, 1, n_samples)
+        )
+
+        df['heart_disease'] = (risk_score > 3).astype(int)
+
+        return df
+
+    def exploratory_data_analysis(self, df):
+        """
+        Perform Exploratory Data Analysis as mentioned in the methodology
+        """
+        print("=== EXPLORATORY DATA ANALYSIS ===")
+        print(f"Dataset shape: {df.shape}")
+        print(f"Heart disease distribution:\n{df['heart_disease'].value_counts()}")
+        print(f"Heart disease percentage: {df['heart_disease'].mean():.2%}")
+
+        # Create visualizations
+        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+        fig.suptitle('Cardiovascular Disease - Exploratory Data Analysis', fontsize=16)
+
+        # Age distribution
+        axes[0, 0].hist(df[df['heart_disease'] == 0]['age'], alpha=0.7, label='No CVD', bins=20)
+        axes[0, 0].hist(df[df['heart_disease'] == 1]['age'], alpha=0.7, label='CVD', bins=20)
+        axes[0, 0].set_title('Age Distribution')
+        axes[0, 0].legend()
+
+        # Cholesterol distribution
+        axes[0, 1].hist(df[df['heart_disease'] == 0]['cholesterol'], alpha=0.7, label='No CVD', bins=20)
+        axes[0, 1].hist(df[df['heart_disease'] == 1]['cholesterol'], alpha=0.7, label='CVD', bins=20)
+        axes[0, 1].set_title('Cholesterol Distribution')
+        axes[0, 1].legend()
+
+        # Blood pressure distribution
+        axes[0, 2].hist(df[df['heart_disease'] == 0]['resting_bp'], alpha=0.7, label='No CVD', bins=20)
+        axes[0, 2].hist(df[df['heart_disease'] == 1]['resting_bp'], alpha=0.7, label='CVD', bins=20)
+        axes[0, 2].set_title('Resting Blood Pressure Distribution')
+        axes[0, 2].legend()
+
+        # Heart rate distribution
+        axes[1, 0].hist(df[df['heart_disease'] == 0]['max_heart_rate'], alpha=0.7, label='No CVD', bins=20)
+        axes[1, 0].hist(df[df['heart_disease'] == 1]['max_heart_rate'], alpha=0.7, label='CVD', bins=20)
+        axes[1, 0].set_title('Max Heart Rate Distribution')
+        axes[1, 0].legend()
+
+        # Correlation heatmap
+        correlation_matrix = df.corr()
+        sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', center=0, ax=axes[1, 1])
+        axes[1, 1].set_title('Feature Correlation Heatmap')
+
+        # Box plot for key features
+        key_features = ['age', 'cholesterol', 'resting_bp', 'max_heart_rate', 'oldpeak']
+        df_melted = df[key_features + ['heart_disease']].melt(id_vars=['heart_disease'])
+        sns.boxplot(data=df_melted, x='heart_disease', y='value', hue='variable', ax=axes[1, 2])
+        axes[1, 2].set_title('Box Plot of Key Features')
+        axes[1, 2].legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+
+        plt.tight_layout()
+        plt.show()
+
+        return df
+
+    def preprocess_data(self, df):
+        """
+        Data preprocessing as described in the methodology
+        """
+        print("\n=== DATA PREPROCESSING ===")
+
+        # Handle missing values (mean imputation for numerical, mode for categorical)
+        numerical_cols = df.select_dtypes(include=[np.number]).columns
+        categorical_cols = df.select_dtypes(include=[object]).columns
+
+        for col in numerical_cols:
+            if df[col].isnull().any():
+                df[col].fillna(df[col].mean(), inplace=True)
+
+        for col in categorical_cols:
+            if df[col].isnull().any():
+                df[col].fillna(df[col].mode()[0], inplace=True)
+
+        # Outlier detection and removal using IQR method
+        Q1 = df[numerical_cols].quantile(0.25)
+        Q3 = df[numerical_cols].quantile(0.75)
+        IQR = Q3 - Q1
+
+        # Remove outliers
+        outlier_condition = ~((df[numerical_cols] < (Q1 - 1.5 * IQR)) |
+                              (df[numerical_cols] > (Q3 + 1.5 * IQR))).any(axis=1)
+        df_clean = df[outlier_condition].copy()
+
+        print(f"Removed {len(df) - len(df_clean)} outliers")
+        print(f"Final dataset shape: {df_clean.shape}")
+
+        return df_clean
+
+    def prepare_features(self, df):
+        """
+        Feature preparation and encoding
+        """
+        # Separate features and target
+        X = df.drop('heart_disease', axis=1)
+        y = df['heart_disease']
+
+        # Store feature names
+        self.feature_names = X.columns.tolist()
+
+        # Handle categorical variables
+        categorical_features = ['sex', 'chest_pain_type', 'fasting_bs', 'resting_ecg',
+                                'exercise_angina', 'st_slope', 'smoking', 'diabetes']
+
+        # Scale numerical features
+        numerical_features = [col for col in X.columns if col not in categorical_features]
+        if numerical_features:
+            X[numerical_features] = self.scaler.fit_transform(X[numerical_features])
+
+        return X, y, categorical_features
+
+    def handle_class_imbalance(self, X, y):
+        """
+        Handle class imbalance using SMOTE
+        """
+        print("\n=== HANDLING CLASS IMBALANCE ===")
+        print(f"Original class distribution: {np.bincount(y)}")
+
+        smote = SMOTE(random_state=42)
+        X_balanced, y_balanced = smote.fit_resample(X, y)
+
+        print(f"Balanced class distribution: {np.bincount(y_balanced)}")
+
+        return X_balanced, y_balanced
+
+    def train_models(self, X_train, X_test, y_train, y_test, categorical_features):
+        """
+        Train multiple models as mentioned in the paper
+        """
+        print("\n=== MODEL TRAINING ===")
+
+        # Define models
+        models = {
+            'Logistic Regression': LogisticRegression(random_state=42),
+            'Random Forest': RandomForestClassifier(random_state=42, n_estimators=100),
+            'SVM': SVC(random_state=42, probability=True)
+        }
+
+        # Add CatBoost if available
+        if CATBOOST_AVAILABLE:
+            models['CatBoost'] = CatBoostClassifier(
+                random_state=42,
+                verbose=False,
+                cat_features=categorical_features
+            )
+
+        # Train and evaluate models
+        results = {}
+
+        for name, model in models.items():
+            print(f"Training {name}...")
+
+            # Train model
+            model.fit(X_train, y_train)
+
+            # Make predictions
+            y_pred = model.predict(X_test)
+            y_pred_proba = model.predict_proba(X_test)[:, 1]
+
+            # Calculate metrics
+            accuracy = accuracy_score(y_test, y_pred)
+            precision = precision_score(y_test, y_pred)
+            recall = recall_score(y_test, y_pred)
+            f1 = f1_score(y_test, y_pred)
+            auc_roc = roc_auc_score(y_test, y_pred_proba)
+
+            results[name] = {
+                'model': model,
+                'accuracy': accuracy,
+                'precision': precision,
+                'recall': recall,
+                'f1_score': f1,
+                'auc_roc': auc_roc,
+                'y_pred': y_pred,
+                'y_pred_proba': y_pred_proba
+            }
+
+            print(f"{name} - Accuracy: {accuracy:.4f}, F1-Score: {f1:.4f}, AUC-ROC: {auc_roc:.4f}")
+
+        self.models = results
+        return results
+
+    def hyperparameter_tuning(self, X_train, y_train, categorical_features):
+        """
+        Hyperparameter tuning for CatBoost model
+        """
+        if not CATBOOST_AVAILABLE:
+            print("CatBoost not available for hyperparameter tuning")
+            return None
+
+        print("\n=== HYPERPARAMETER TUNING FOR CATBOOST ===")
+
+        # Define parameter grid as mentioned in the paper
+        param_grid = {
+            'learning_rate': [0.01, 0.05, 0.1],
+            'depth': [4, 6, 8],
+            'l2_leaf_reg': [1, 3, 5],
+            'iterations': [500, 1000, 1500]
+        }
+
+        # Grid search
+        catboost_model = CatBoostClassifier(
+            random_state=42,
+            verbose=False,
+            cat_features=categorical_features
+        )
+
+        grid_search = GridSearchCV(
+            catboost_model,
+            param_grid,
+            cv=5,
+            scoring='f1',
+            n_jobs=-1,
+            verbose=1
+        )
+
+        grid_search.fit(X_train, y_train)
+
+        print(f"Best parameters: {grid_search.best_params_}")
+        print(f"Best cross-validation score: {grid_search.best_score_:.4f}")
+
+        self.best_model = grid_search.best_estimator_
+        return grid_search.best_estimator_
+
+    def evaluate_models(self, X_test, y_test):
+        """
+        Comprehensive model evaluation
+        """
+        print("\n=== MODEL EVALUATION RESULTS ===")
+
+        # Create results DataFrame
+        results_df = pd.DataFrame({
+            'Model': list(self.models.keys()),
+            'Accuracy': [self.models[model]['accuracy'] for model in self.models],
+            'Precision': [self.models[model]['precision'] for model in self.models],
+            'Recall': [self.models[model]['recall'] for model in self.models],
+            'F1-Score': [self.models[model]['f1_score'] for model in self.models],
+            'AUC-ROC': [self.models[model]['auc_roc'] for model in self.models]
+        })
+
+        print(results_df.round(4))
+
+        # Visualize results
+        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+        fig.suptitle('Model Performance Comparison', fontsize=16)
+
+        # Performance metrics comparison
+        metrics = ['Accuracy', 'Precision', 'Recall', 'F1-Score', 'AUC-ROC']
+        x_pos = np.arange(len(results_df))
+
+        for i, metric in enumerate(metrics[:4]):
+            ax = axes[i // 2, i % 2]
+            bars = ax.bar(x_pos, results_df[metric], alpha=0.7)
+            ax.set_title(f'{metric} Comparison')
+            ax.set_xlabel('Models')
+            ax.set_ylabel(metric)
+            ax.set_xticks(x_pos)
+            ax.set_xticklabels(results_df['Model'], rotation=45)
+
+            # Add value labels on bars
+            for bar in bars:
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width() / 2., height,
+                        f'{height:.3f}', ha='center', va='bottom')
+
+        plt.tight_layout()
+        plt.show()
+
+        # ROC curves
+        plt.figure(figsize=(10, 8))
+        for name in self.models:
+            y_pred_proba = self.models[name]['y_pred_proba']
+            fpr, tpr, _ = roc_curve(y_test, y_pred_proba)
+            auc = self.models[name]['auc_roc']
+            plt.plot(fpr, tpr, label=f'{name} (AUC = {auc:.3f})')
+
+        plt.plot([0, 1], [0, 1], 'k--', label='Random Classifier')
+        plt.xlabel('False Positive Rate')
+        plt.ylabel('True Positive Rate')
+        plt.title('ROC Curves Comparison')
+        plt.legend()
+        plt.grid(True)
+        plt.show()
+
+        return results_df
+
+    def model_interpretability(self, X_test, y_test, model_name='CatBoost'):
+        """
+        Model interpretability using SHAP (if available)
+        """
+        if not SHAP_AVAILABLE:
+            print("SHAP not available for model interpretability")
+            return
+
+        if model_name not in self.models:
+            print(f"Model {model_name} not found")
+            return
+
+        print(f"\n=== MODEL INTERPRETABILITY - {model_name} ===")
+
+        model = self.models[model_name]['model']
+
+        # Create SHAP explainer
+        explainer = shap.Explainer(model, X_test)
+        shap_values = explainer(X_test)
+
+        # Summary plot
+        plt.figure(figsize=(10, 8))
+        shap.summary_plot(shap_values, X_test, feature_names=self.feature_names, show=False)
+        plt.title(f'SHAP Summary Plot - {model_name}')
+        plt.tight_layout()
+        plt.show()
+
+        # Feature importance
+        feature_importance = np.abs(shap_values.values).mean(0)
+        feature_importance_df = pd.DataFrame({
+            'feature': self.feature_names,
+            'importance': feature_importance
+        }).sort_values('importance', ascending=False)
+
+        print("Top 10 Most Important Features:")
+        print(feature_importance_df.head(10))
+
+        return feature_importance_df
+
+    def confusion_matrix_analysis(self, y_test, model_name='CatBoost'):
+        """
+        Detailed confusion matrix analysis
+        """
+        if model_name not in self.models:
+            print(f"Model {model_name} not found")
+            return
+
+        print(f"\n=== CONFUSION MATRIX ANALYSIS - {model_name} ===")
+
+        y_pred = self.models[model_name]['y_pred']
+        cm = confusion_matrix(y_test, y_pred)
+
+        # Plot confusion matrix
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                    xticklabels=['No CVD', 'CVD'],
+                    yticklabels=['No CVD', 'CVD'])
+        plt.title(f'Confusion Matrix - {model_name}')
+        plt.xlabel('Predicted')
+        plt.ylabel('Actual')
+        plt.show()
+
+        # Classification report
+        print("Classification Report:")
+        print(classification_report(y_test, y_pred, target_names=['No CVD', 'CVD']))
+
+        return cm
+
+    def predict_single_case(self, patient_data, model_name='CatBoost'):
+        """
+        Predict CVD risk for a single patient
+        """
+        if model_name not in self.models:
+            print(f"Model {model_name} not found")
+            return None
+
+        model = self.models[model_name]['model']
+
+        # Create DataFrame from patient data
+        patient_df = pd.DataFrame([patient_data])
+
+        # Make prediction
+        prediction = model.predict(patient_df)[0]
+        probability = model.predict_proba(patient_df)[0][1]
+
+        print(f"\n=== INDIVIDUAL PATIENT PREDICTION ===")
+        print(f"Patient Data: {patient_data}")
+        print(f"CVD Risk Prediction: {'High Risk' if prediction == 1 else 'Low Risk'}")
+        print(f"Risk Probability: {probability:.3f}")
+
+        return prediction, probability
+
+
+def main():
+    """
+    Main function to run the CVD prediction system
+    """
+    print("Cardiovascular Disease Prediction System")
+    print("=" * 50)
+
+    # Initialize predictor
+    predictor = CVDPredictor()
+
+    # Create sample data
+    print("Creating sample cardiovascular disease dataset...")
+    df = predictor.create_sample_data(n_samples=1000)
+
+    # Exploratory Data Analysis
+    df = predictor.exploratory_data_analysis(df)
+
+    # Data preprocessing
+    df_clean = predictor.preprocess_data(df)
+
+    # Feature preparation
+    X, y, categorical_features = predictor.prepare_features(df_clean)
+
+    # Handle class imbalance
+    X_balanced, y_balanced = predictor.handle_class_imbalance(X, y)
+
+    # Train-test split
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_balanced, y_balanced, test_size=0.2, random_state=42, stratify=y_balanced
+    )
+
+    # Train models
+    results = predictor.train_models(X_train, X_test, y_train, y_test, categorical_features)
+
+    # Hyperparameter tuning for CatBoost
+    best_catboost = predictor.hyperparameter_tuning(X_train, y_train, categorical_features)
+
+    # Evaluate models
+    results_df = predictor.evaluate_models(X_test, y_test)
+
+    # Model interpretability
+    predictor.model_interpretability(X_test, y_test)
+
+    # Confusion matrix analysis
+    predictor.confusion_matrix_analysis(y_test)
+
+    # Example single patient prediction
+    sample_patient = {
+        'age': 60,
+        'sex': 1,  # Male
+        'chest_pain_type': 2,
+        'resting_bp': 150,
+        'cholesterol': 280,
+        'fasting_bs': 1,
+        'resting_ecg': 1,
+        'max_heart_rate': 120,
+        'exercise_angina': 1,
+        'oldpeak': 2.5,
+        'st_slope': 2,
+        'smoking': 1,
+        'diabetes': 1
+    }
+
+    predictor.predict_single_case(sample_patient)
+
+    print("\n=== FINAL RESULTS SUMMARY ===")
+    print(f"Best performing model: {results_df.loc[results_df['F1-Score'].idxmax(), 'Model']}")
+    print(f"Best F1-Score: {results_df['F1-Score'].max():.4f}")
+    print(f"Best Accuracy: {results_df['Accuracy'].max():.4f}")
+
+    if CATBOOST_AVAILABLE:
+        catboost_results = results_df[results_df['Model'] == 'CatBoost']
+        if not catboost_results.empty:
+            print(f"\nCatBoost Performance (as mentioned in paper):")
+            print(f"Accuracy: {catboost_results['Accuracy'].iloc[0]:.4f}")
+            print(f"F1-Score: {catboost_results['F1-Score'].iloc[0]:.4f}")
+            print(f"AUC-ROC: {catboost_results['AUC-ROC'].iloc[0]:.4f}")
+
+
+if __name__ == "__main__":
+    main()
